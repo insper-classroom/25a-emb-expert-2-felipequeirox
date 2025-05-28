@@ -1,51 +1,77 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
-#include "hardware/gpio.h"
 #include "hardware/adc.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
-// Bibliotecas para o display ILI9341
 #include "tft_lcd_ili9341/ili9341/ili9341.h"
 #include "tft_lcd_ili9341/gfx/gfx.h"
 
-// Biblioteca para o touch resistivo
-#include "tft_lcd_ili9341/touch_resistive/touch_resistive.h"
+#define SCREEN_WIDTH 240
+#define BACKLIGHT_PIN 15
+#define LDR_GPIO 26
+#define LDR_ADC_CHANNEL 0
+#define R_LOAD 10000.0f // 10k Ohms
 
-// === Definições para ILI9341 ===
-const uint LITE = 15;         // Pino de controle da luz de fundo (backlight)
-#define SCREEN_WIDTH 240      // Largura da tela em pixels
+// Variáveis globais
+float global_voltage = 0;
+float global_current = 0;
+float global_resistance = 0;
+uint16_t global_adc_raw = 0;
 
-int main(void) {
-    stdio_init_all();         // Inicializa entrada/saída padrão (USB serial)
-
-    // Inicialização do display LCD e sistema gráfico
-    LCD_initDisplay();        // Inicializa o controlador do display
-    LCD_setRotation(0);       // Define a rotação da tela (0 = retrato padrão)
-    GFX_createFramebuf();     // Cria um framebuffer em memória para renderização
-
-    configure_touch();        // Inicializa o sistema de leitura do touch resistivo
-
-    // Configura o pino de backlight como saída e ativa a luz de fundo
-    gpio_init(LITE);
-    gpio_set_dir(LITE, GPIO_OUT);
-    gpio_put(LITE, 1);        // Liga o backlight (nível alto)
-
-    int px, py;               // Variáveis para armazenar coordenadas do toque
+void task_sensor(void *params) {
+    adc_init();
+    adc_gpio_init(LDR_GPIO);
 
     while (true) {
-        // === Parte de atualização gráfica da tela ===
-        GFX_clearScreen();              // Limpa o framebuffer
-        GFX_setCursor(0, 10);           // Define posição do texto
-        GFX_printf("Touch Demo\n");     // Mostra título/demonstração
+        adc_select_input(LDR_ADC_CHANNEL);
 
-        // Verifica se há toque na tela e lê as coordenadas
-        if (readPoint(&px, &py)) {
-            px = SCREEN_WIDTH - px;    // Inverte eixo X, para exibir o valor correto
-            GFX_printf("X:%03d Y:%03d\n", px, py);  // Exibe coordenadas do toque
-        } else {
-            GFX_printf("Sem toque\n"); // Mensagem quando não há toque detectado
-        }
+        uint16_t raw = adc_read();
+        float voltage = raw * 3.3f / 4095.0f;
+        float current = voltage / R_LOAD;
+        float resistance = voltage > 0.0f ? (3.3f - voltage) * R_LOAD / voltage : 1e6; // Proteção contra divisão por zero
 
-        GFX_flush();       // Atualiza o display com o conteúdo do framebuffer
-        sleep_ms(1);       // Pequeno atraso para evitar uso excessivo da CPU
+        global_adc_raw = raw;
+        global_voltage = voltage;
+        global_current = current;
+        global_resistance = resistance;
+
+        printf("LDR | ADC: %d | V=%.2f V | R=%.0f Ohm | I=%.2f mA\n",
+               raw, voltage, resistance, current * 1000.0f);
+
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
+}
+
+void task_display(void *params) {
+    LCD_initDisplay();
+    LCD_setRotation(0);
+    GFX_createFramebuf();
+
+    gpio_init(BACKLIGHT_PIN);
+    gpio_set_dir(BACKLIGHT_PIN, GPIO_OUT);
+    gpio_put(BACKLIGHT_PIN, 1);
+
+    while (true) {
+        GFX_clearScreen();
+        GFX_setCursor(10, 10);
+        GFX_printf("LDR - Sensor de Luz\n");
+        GFX_printf("ADC: %4d\n", global_adc_raw);
+        GFX_printf("Tensao: %.2f V\n", global_voltage);
+        GFX_printf("Resistencia: %.0f Ohm\n", global_resistance);
+        GFX_printf("Corrente: %.2f mA\n", global_current * 1000.0f);
+
+        GFX_flush();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+int main(void) {
+    stdio_init_all();
+
+    xTaskCreate(task_sensor, "Sensor", 512, NULL, 1, NULL);
+    xTaskCreate(task_display, "Display", 2048, NULL, 1, NULL);
+
+    vTaskStartScheduler();
+    while (true);
 }
